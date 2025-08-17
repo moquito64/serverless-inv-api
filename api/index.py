@@ -19,6 +19,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 # Get the database connection string from environment variables
 DATABASE_URL = os.environ.get("DATABASE_URL")
+# Get the secret API key from environment variables
+API_KEY = os.environ.get("API_KEY")
 
 # --- Helper functions for database operations ---
 
@@ -158,7 +160,15 @@ class handler(BaseHTTPRequestHandler):
                 conn.close()
 
     def _handle_get_inventory(self):
-        """Handles the /api/inventory GET request logic."""
+        """
+        Handles the /api/inventory GET request logic.
+        Requires a secret API key in the 'Authorization' header.
+        """
+        if not self.headers.get('Authorization') or self.headers.get('Authorization') != f'Bearer {API_KEY}':
+            logging.warning("Unauthorized access attempt to /api/inventory")
+            self._send_response(401, {"error": "Unauthorized"})
+            return
+
         conn = None
         try:
             conn = get_db_connection()
