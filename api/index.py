@@ -2,31 +2,20 @@
 # This is a serverless function for Vercel that acts as an API endpoint
 # for a server inventory, using a Neon Postgres database for persistence.
 #
-# To run this locally, you'll need:
-# - A Neon account and a new project to get the DATABASE_URL.
-# - A .env file with DATABASE_URL="your-connection-string"
-# - The required dependencies installed: pip install python-dotenv psycopg2-binary
-#
-# For Vercel deployment, you'll set the DATABASE_URL as an environment variable
-# in your project settings.
+# This updated version includes more robust error handling and logging
+# to help diagnose FUNCTION_INVOCATION_FAILED errors.
 
 import os
 import json
 from datetime import datetime
 import logging
 import psycopg2
+import psycopg2.extras # Import for DictCursor
 from http.server import BaseHTTPRequestHandler
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse
 
-# Load environment variables from .env file for local development
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass  # In production, Vercel sets the env vars directly
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# Configure logging to be more detailed
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # Get the database connection string from environment variables
 DATABASE_URL = os.environ.get("DATABASE_URL")
@@ -34,16 +23,28 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 # --- Helper functions for database operations ---
 
 def get_db_connection():
-    """Establishes and returns a database connection."""
+    """Establishes and returns a database connection with better error handling."""
     if not DATABASE_URL:
+        logging.error("DATABASE_URL environment variable is not set.")
         raise ValueError("DATABASE_URL environment variable is not set.")
-    return psycopg2.connect(DATABASE_URL)
+    try:
+        # Connect to the database and return the connection object
+        conn = psycopg2.connect(DATABASE_URL)
+        logging.info("Successfully connected to the database.")
+        return conn
+    except psycopg2.OperationalError as e:
+        logging.error(f"Operational error while connecting to PostgreSQL: {e}")
+        raise
+    except Exception as e:
+        logging.error(f"An unexpected error occurred during database connection: {e}")
+        raise
 
 def create_servers_table():
     """
     Creates the 'servers' table if it does not already exist.
     This ensures our database schema is ready.
     """
+    conn = None
     try:
         conn = get_db_connection()
         with conn.cursor() as cur:
@@ -78,6 +79,8 @@ def handler(request):
     method = request.method
     
     try:
+        # Check for the /api path. The vercel.json routes all requests to this file,
+        # so we need to handle the specific endpoints here.
         if path == "/api/report" and method == "POST":
             return handle_report(request)
         elif path == "/api/inventory" and method == "GET":
@@ -86,6 +89,7 @@ def handler(request):
             server_name = path.split("/api/delete/")[1]
             return handle_delete_server(server_name)
         else:
+            # This is the 404 handler for any path that doesn't match our API routes.
             return {
                 "statusCode": 404,
                 "body": json.dumps({"error": "Endpoint not found."}),
@@ -93,7 +97,8 @@ def handler(request):
             }
 
     except Exception as e:
-        logging.error(f"An unexpected error occurred: {e}")
+        # Catch any unexpected errors from the routing logic itself
+        logging.error(f"An unexpected error occurred in handler: {e}")
         return {
             "statusCode": 500,
             "body": json.dumps({"error": "Internal server error."}),
@@ -102,7 +107,9 @@ def handler(request):
 
 def handle_report(request):
     """Handles the /api/report POST request to add or update server data."""
+    conn = None
     try:
+        # Parse the JSON body from the request
         server_data = json.loads(request.body)
         
         # Ensure the required fields are present
@@ -140,11 +147,18 @@ def handle_report(request):
             "headers": {"Content-Type": "application/json"}
         }
 
+    except (json.JSONDecodeError, KeyError) as e:
+        logging.error(f"Invalid JSON payload or missing key: {e}")
+        return {
+            "statusCode": 400,
+            "body": json.dumps({"error": "Invalid JSON payload or missing fields."}),
+            "headers": {"Content-Type": "application/json"}
+        }
     except (Exception, psycopg2.Error) as error:
         logging.error(f"Error handling report: {error}")
         return {
             "statusCode": 500,
-            "body": json.dumps({"error": "Failed to update server data."}),
+            "body": json.dumps({"error": "Failed to update server data due to a database error."}),
             "headers": {"Content-Type": "application/json"}
         }
     finally:
@@ -165,7 +179,8 @@ def handle_get_inventory():
 
             # Fix last_report to be JSON serializable
             for server in servers_list:
-                server['last_report'] = server['last_report'].isoformat()
+                if 'last_report' in server and server['last_report'] is not None:
+                    server['last_report'] = server['last_report'].isoformat()
             
             return {
                 "statusCode": 200,
@@ -219,5 +234,4 @@ def handle_delete_server(server_name):
     finally:
         if conn:
             conn.close()
-
 
